@@ -29,7 +29,7 @@
 
 #include <stdint.h>
 #include "tee_client_api.h"
-#include <linux/tee_ioc.h>
+#include <optee/tee_ioc.h>
 
 #ifndef strlcpy
 #define strlcpy(dst, src, size) snprintf((dst), (size), "%s", (src))

@@ -266,7 +266,7 @@ TEEC_Result TEEC_OpenSession(TEEC_Context *context,
 	}
 
 	teec_resetTeeCmd(&cmd);
-	cmd.uuid = (TEEC_UUID *)destination;
+	cmd.uuid = (struct teec_uuid *)destination;
 
 	if (operation == NULL) {
 		/*
@@ -280,7 +280,7 @@ TEEC_Result TEEC_OpenSession(TEEC_Context *context,
 		operation = &dummy_op;
 	}
 
-	cmd.op = operation;
+	cmd.op = (struct teec_op_desc *)operation;
 
 	errno = 0;
 	if (ioctl(context->fd, TEE_OPEN_SESSION_IOC, &cmd) != 0) {
@@ -377,7 +377,7 @@ TEEC_Result TEEC_InvokeCommand(TEEC_Session *session,
 	teec_resetTeeCmd(&cmd);
 
 	cmd.cmd = cmd_id;
-	cmd.op = operation;
+	cmd.op = (struct teec_op_desc *)operation;
 
 	if (ioctl(session->fd, TEE_INVOKE_COMMAND_IOC, &cmd) != 0)
 		EMSG("Ioctl(TEE_INVOKE_COMMAND_IOC) failed! (%s)\n",
@@ -419,7 +419,7 @@ void TEEC_RequestCancellation(TEEC_Operation *operation)
 
 	teec_resetTeeCmd(&cmd);
 
-	cmd.op = operation;
+	cmd.op = (struct teec_op_desc *)operation;
 
 	if (ioctl(session->fd, TEE_REQUEST_CANCELLATION_IOC, &cmd) != 0)
 		EMSG("Ioctl(TEE_REQUEST_CANCELLATION_IOC) failed! (%s)\n",
