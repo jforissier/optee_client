@@ -161,7 +161,7 @@ TEEC_Result TEEC_AllocateSharedMemory(TEEC_Context *context,
 	shm.size   = size;
 	shm.registered = 0;
 	shm.fd_shm = 0;
-	shm.flags = TEEC_MEM_INPUT | TEEC_MEM_OUTPUT;
+	shm.flags = flags;
 	if (ioctl(context->fd, TEE_ALLOC_SHM_IOC, &shm) != 0) {
 		EMSG("Ioctl(TEE_ALLOC_SHM_IOC) failed! (%s)\n",
 		     strerror(errno));
@@ -169,8 +169,9 @@ TEEC_Result TEEC_AllocateSharedMemory(TEEC_Context *context,
 	}
 	DMSG("fd %d size %zu", shared_memory->d.fd, shared_memory->size);
 
-	shared_memory->size = size;
 	shared_memory->d.fd = shm.fd_shm;
+	if (flags & TEEC_MEM_FRAMEBUFFER)
+		shared_memory->size = shm.size;
 
 	/*
 	 * Map memory to current user space process.

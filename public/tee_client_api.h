@@ -124,6 +124,8 @@
  */
 #define TEEC_MEM_INPUT   0x00000001
 #define TEEC_MEM_OUTPUT  0x00000002
+/* Secure video prototype: shared memory region is the frame buffer */
+#define TEEC_MEM_FRAMEBUFFER 0x00000004
 
 /**
  * Return values. Type is TEEC_Result

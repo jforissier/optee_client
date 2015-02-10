@@ -5,9 +5,8 @@ include ./config.mk
 # Set Internal Variables						#
 # May be modified to match your setup                                   #
 #########################################################################
-BUILD_VERBOSE	?= 0
 VPREFIX		?= @
-ifeq ($(BUILD_VERBOSE),1)
+ifeq (1, $(filter 1,$(BUILD_VERBOSE) $(V)))
 VPREFIX:=
 endif
 export VPREFIX
