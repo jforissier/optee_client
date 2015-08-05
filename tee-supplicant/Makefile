@@ -26,7 +26,11 @@ TEES_CFLAGS	:= $(addprefix -I, $(TEES_INCLUDES)) $(CFLAGS) \
 		   -DDEBUGLEVEL_$(CFG_TEE_SUPP_LOG_LEVEL) \
 		   -DBINARY_PREFIX=\"TEES\"
 TEES_FILE	:= $(OUT_DIR)/$(PACKAGE_NAME)
+ifeq ($(STATIC), true)
+TEES_LDFLAGS    := -static -lpthread  -L$(OUT_DIR)/../libteec  -lteec
+else
 TEES_LDFLAGS    := -L$(OUT_DIR)/../libteec -lteec
+endif
 
 tee-supplicant: $(TEES_FILE)
 

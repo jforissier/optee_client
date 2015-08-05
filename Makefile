@@ -119,6 +119,7 @@ distclean: clean
 
 copy_export: build
 	mkdir -p ${EXPORT_DIR}/lib ${EXPORT_DIR}/include ${EXPORT_DIR}/bin
+	cp ${O}/libteec/libteec.a ${EXPORT_DIR}/lib
 	cp ${O}/libteec/libteec.so* ${EXPORT_DIR}/lib
 	cp ${O}/tee-supplicant/tee-supplicant ${EXPORT_DIR}/bin
 	cp public/*.h ${EXPORT_DIR}/include

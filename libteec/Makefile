@@ -37,6 +37,7 @@ libteec: $(TEEC_LIBRARY)
 
 $(TEEC_LIBRARY): $(TEEC_OBJS)
 	@echo "  LD      $@"
+	$(VPREFIX)$(CROSS_COMPILE)ar rcs $(OUT_DIR)/libteec.a $+
 	$(VPREFIX)$(CC) -shared -Wl,-soname,$(LIB_MAJ_MIN) $(TEEC_LFLAGS) -o $@ $+
 	@echo ""
 

@@ -47,25 +47,35 @@
  * with the user space.
  */
 struct tee_cmd_io {
-	uint32_t err;
+	TEEC_Result err;
 	uint32_t origin;
 	uint32_t cmd;
-	TEEC_UUID __user *uuid;
-	void __user *data;
-	uint32_t data_size;
-	TEEC_Operation __user *op;
 	int fd_sess;
+	union {
+		TEEC_UUID __user *uuid;
+		uint32_t padding_uuid[2];
+	};
+	union {
+		void __user *data;
+		uint32_t padding_data[2];
+	};
+	union {
+		TEEC_Operation __user *op;
+		uint32_t padding[2];
+	};
+	uint32_t data_size;
+	uint32_t reserved;
 };
 
 struct tee_shm_io {
-	void __user *buffer;
-	size_t size;
-	uint32_t flags;
 	union {
-		int fd_shm;
-		void *ptr;
+		void __user *buffer;
+		uint32_t padding[2];
 	};
-	uint8_t registered;
+	uint32_t size;
+	uint32_t flags;
+	int fd_shm;
+	uint32_t registered;
 };
 
 #define TEE_OPEN_SESSION_IOC		_IOWR('t', 161, struct tee_cmd_io)
