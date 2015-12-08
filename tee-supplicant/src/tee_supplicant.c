@@ -47,6 +47,7 @@
 #include <tee_supp_fs.h>
 #include <teec.h>
 #include <pthread.h>
+#include <tee_supp_rpmb.h>
 
 #define TEE_RPC_BUFFER_NUMBER 5
 
@@ -389,6 +390,26 @@ static void get_ree_time(int fd, struct tee_rpc_invoke *inv)
 	OUTMSG();
 }
 
+static void process_rpmb(int fd, struct tee_rpc_invoke *inv)
+{
+	TEEC_SharedMemory req, rsp;
+
+	if (get_param(fd, inv, 0, &req)) {
+		inv->res = TEEC_ERROR_BAD_PARAMETERS;
+		return;
+	}
+	if (get_param(fd, inv, 1, &rsp)) {
+		inv->res = TEEC_ERROR_BAD_PARAMETERS;
+		return;
+	}
+
+	inv->res = rpmb_process_request(req.buffer, req.size, rsp.buffer,
+					rsp.size);
+
+	free_param(&req);
+	free_param(&rsp);
+}
+
 int main(int argc, char *argv[])
 {
 	int fd;
@@ -447,14 +468,23 @@ int main(int argc, char *argv[])
 			case TEE_RPC_FS:
 				process_fs(fd, &request);
 				break;
+
+			case TEE_RPC_RPMB_CMD:
+				process_rpmb(fd, &request);
+				break;
+
 			default:
 				EMSG("Cmd [0x%" PRIx32 "] not supported",
 				     request.cmd);
 				/* Not supported. */
+				request.res = TEEC_ERROR_BAD_PARAMETERS;
+				request.nbr_bf = 0;
 				break;
 			}
+			IMSG("");
 
 			write_response(fd, &request);
+			IMSG("");
 		}
 	} while (ret >= 0);
 
@@ -500,10 +530,12 @@ static void write_response(int fd, struct tee_rpc_invoke *request)
 		EMSG("invalid fd");
 		return;
 	}
+	IMSG("");
 
 	writesize = sizeof(*request) - sizeof(request->cmds) +
 		sizeof(request->cmds[0]) * request->nbr_bf;
 
+	IMSG("");
 	res = write(fd, request, writesize);
 	if (res != writesize)
 		EMSG("error writing to device (%zu)", res);
