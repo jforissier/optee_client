@@ -47,7 +47,7 @@
 #include <tee_supp_fs.h>
 #include <teec.h>
 #include <pthread.h>
-#include <tee_supp_rpmb.h>
+#include <rpmb.h>
 
 #define TEE_RPC_BUFFER_NUMBER 5
 
@@ -394,13 +394,14 @@ static void process_rpmb(int fd, struct tee_rpc_invoke *inv)
 {
 	TEEC_SharedMemory req, rsp;
 
+	INMSG();
 	if (get_param(fd, inv, 0, &req)) {
 		inv->res = TEEC_ERROR_BAD_PARAMETERS;
-		return;
+		goto out;
 	}
 	if (get_param(fd, inv, 1, &rsp)) {
 		inv->res = TEEC_ERROR_BAD_PARAMETERS;
-		return;
+		goto out;
 	}
 
 	inv->res = rpmb_process_request(req.buffer, req.size, rsp.buffer,
@@ -408,6 +409,8 @@ static void process_rpmb(int fd, struct tee_rpc_invoke *inv)
 
 	free_param(&req);
 	free_param(&rsp);
+out:
+	OUTMSG();
 }
 
 int main(int argc, char *argv[])
