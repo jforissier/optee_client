@@ -152,35 +152,177 @@ static int mmc_rpmb_fd(uint16_t dev_id)
 
 #define IOCTL(fd, request, ...) ioctl_emu((fd), (request), ##__VA_ARGS__)
 
+#define EMU_RPMB_SIZE_BLOCKS	16
+#define EMU_RPMB_SIZE_BYTES	(512 * EMU_RPMB_SIZE_BLOCKS)
+
+struct rpmb_emu {
+	uint8_t buf[EMU_RPMB_SIZE_BYTES];
+	size_t size;
+	uint8_t key[32];
+	uint8_t nonce[16];
+	uint32_t write_counter;
+	uint16_t last_op_type;	/* Type of last operation */
+	uint16_t op_result;	/* Result of last operation */
+};
+static struct rpmb_emu rpmb_emu = {
+	.size = EMU_RPMB_SIZE_BYTES
+};
+
+static struct rpmb_emu *mem_for_fd(int fd)
+{
+	static int sfd = -1;
+
+	if (sfd == -1)
+		sfd = fd;
+	if (sfd != fd) {
+		EMSG("Emulating more than 1 RPMB partition is not supported");
+		return NULL;
+	}
+
+	return &rpmb_emu;
+}
+
+static uint16_t ioctl_emu_mem_transfer(struct rpmb_emu *mem,
+				       struct rpmb_data_frame *frm,
+				       size_t nfrm, int to_mmc)
+{
+	size_t start = ntohs(frm->address) * 256;
+	size_t size = nfrm * 256;
+	size_t i;
+	uint8_t *memptr;
+
+	if (start > mem->size || start + size > mem->size) {
+		EMSG("Transfer bounds exceeed emulated memory");
+		return RPMB_RESULT_ADDRESS_FAILURE;
+	}
+	DMSG("Transfering data (to_mmc=%d)", to_mmc);
+	for (i = 0; i < nfrm; i++) {
+		memptr = mem->buf + start + i * 256;
+		if (to_mmc) {
+			memcpy(memptr, frm->data, 256);
+			mem->write_counter++;
+			frm->write_counter = mem->write_counter;
+			frm->msg_type =
+				htons(RPMB_MSG_TYPE_RESP_AUTH_DATA_WRITE);
+		} else {
+			memcpy(frm->data, memptr, 256);
+			frm->msg_type =
+				htons(RPMB_MSG_TYPE_RESP_AUTH_DATA_READ);
+		}
+		frm->op_result = RPMB_RESULT_OK;
+	}
+
+	return RPMB_RESULT_OK;
+}
+
+static uint16_t ioctl_emu_setkey(struct rpmb_emu *mem,
+				 struct rpmb_data_frame *frm)
+{
+	DMSG("Setting key");
+	memcpy(mem->key, frm->key_mac, 32);
+	return RPMB_RESULT_OK;
+}
+
+static uint16_t ioctl_emu_read_ctr(struct rpmb_emu *mem,
+				   struct rpmb_data_frame *frm)
+{
+	DMSG("Reading counter");
+	frm->write_counter = htonl(mem->write_counter);
+	return RPMB_RESULT_OK;
+}
+
 /* A crude emulation of the MMC ioctls we need for RPMB */
 static int ioctl_emu(int fd, unsigned long request, ...)
 {
 	struct mmc_ioc_cmd *cmd;
+	struct rpmb_data_frame *frm;
+	uint16_t msg_type;
+	struct rpmb_emu *mem = mem_for_fd(fd);
 	va_list ap;
-	(void)fd;
 
 	if (request != MMC_IOC_CMD) {
 		EMSG("Unsupported ioctl: 0x%lx", request);
 		return -1;
 	}
+	if (!mem)
+		return -1;
 
+	INMSG();
 	va_start(ap, request);
 	cmd = va_arg(ap, struct mmc_ioc_cmd *);
 	va_end(ap);
 
+	frm = (struct rpmb_data_frame *)cmd->data_ptr;
+	msg_type = ntohs(frm->msg_type);
+
+
 	switch (cmd->opcode) {
 	case MMC_WRITE_MULTIPLE_BLOCK:
-		DMSG("MMC_WRITE_MULTIPLE_BLOCK");
+		switch (msg_type) {
+		case RPMB_MSG_TYPE_REQ_AUTH_KEY_PROGRAM:
+			/* Write key */
+			mem->op_result = ioctl_emu_setkey(mem, frm);
+			mem->last_op_type = msg_type;
+			break;
+
+		case RPMB_MSG_TYPE_REQ_AUTH_DATA_WRITE:
+			/* Write data */
+			mem->op_result = ioctl_emu_mem_transfer(mem, frm,
+								cmd->blocks, 1);
+			mem->last_op_type = msg_type;
+			break;
+
+		case RPMB_MSG_TYPE_REQ_WRITE_COUNTER_VAL_READ:
+		case RPMB_MSG_TYPE_REQ_AUTH_DATA_READ:
+			memcpy(mem->nonce, frm->nonce, 16);
+			mem->last_op_type = msg_type;
+			break;
+		default:
+			break;
+		}
 		break;
 
 	case MMC_READ_MULTIPLE_BLOCK:
-		DMSG("MMC_READ_MULTIPLE_BLOCK");
+		switch (mem->last_op_type) {
+		case RPMB_MSG_TYPE_REQ_AUTH_KEY_PROGRAM:
+			frm->msg_type =
+				htons(RPMB_MSG_TYPE_RESP_AUTH_KEY_PROGRAM);
+			frm->op_result = mem->op_result;
+			break;
+
+		case RPMB_MSG_TYPE_REQ_AUTH_DATA_WRITE:
+			frm->msg_type =
+				htons(RPMB_MSG_TYPE_RESP_AUTH_DATA_WRITE);
+			frm->op_result = mem->op_result;
+			break;
+
+		case RPMB_MSG_TYPE_REQ_WRITE_COUNTER_VAL_READ:
+			/* Read counter */
+			frm->msg_type =
+			  htons(RPMB_MSG_TYPE_RESP_WRITE_COUNTER_VAL_READ);
+			frm->op_result = ioctl_emu_read_ctr(mem, frm);
+			memcpy(frm->nonce, mem->nonce, 16);
+			break;
+
+		case RPMB_MSG_TYPE_REQ_AUTH_DATA_READ:
+			/* Read data */
+			frm->op_result = ioctl_emu_mem_transfer(mem, frm,
+								cmd->blocks,
+								0);
+			memcpy(frm->nonce, mem->nonce, 16);
+			break;
+
+		default:
+			EMSG("Unexpected");
+			break;
+		}
 		break;
 
 	default:
-		EMSG("Unsupported opcode: 0x%04x", cmd->opcode);
+		EMSG("Unsupported ioctl opcode 0x%08x", cmd->opcode);
 		return -1;
 	}
+	OUTMSG();
 
 	return 0;
 }
@@ -193,7 +335,7 @@ static int mmc_rpmb_fd(uint16_t dev_id)
 	return 0;
 }
 
-#endif /* ! RPMB_EMU */
+#endif /* RPMB_EMU */
 
 static uint32_t rpmb_data_req(int fd, struct rpmb_data_frame *req_frm,
 			      size_t req_nfrm, struct rpmb_data_frame *rsp_frm,
@@ -202,14 +344,20 @@ static uint32_t rpmb_data_req(int fd, struct rpmb_data_frame *req_frm,
 	int st;
 	size_t i;
 	uint16_t msg_type = ntohs(req_frm->msg_type);
-	struct mmc_ioc_cmd cmd = {
+	struct mmc_ioc_cmd cmd;/* = {
 		.blksz = 512,
 		.blocks = req_nfrm,
 		.data_ptr = (uintptr_t)req_frm,
 		.flags = MMC_RSP_R1 | MMC_CMD_ADTC,
 		.opcode = MMC_WRITE_MULTIPLE_BLOCK,
 		.write_flag = 1
-		};
+		};*/
+	cmd.blksz = 512;
+	cmd.blocks = req_nfrm;
+	cmd.data_ptr = (uintptr_t)req_frm;
+	cmd.flags = MMC_RSP_R1 | MMC_CMD_ADTC;
+	cmd.opcode = MMC_WRITE_MULTIPLE_BLOCK;
+	cmd.write_flag = 1;
 
 	for (i = 1; i < req_nfrm; i++) {
 		if (req_frm[i].msg_type != msg_type) {
@@ -218,8 +366,8 @@ static uint32_t rpmb_data_req(int fd, struct rpmb_data_frame *req_frm,
 		}
 	}
 
-	DMSG("Req: %zu frames of type 0x%04x", req_nfrm, msg_type);
-	DMSG("Rsp: %zu frames", rsp_nfrm);
+	DMSG("Req: %zu frame(s) of type 0x%04x", req_nfrm, msg_type);
+	DMSG("Rsp: %zu frame(s)", rsp_nfrm);
 
 	switch(msg_type) {
 	case RPMB_MSG_TYPE_REQ_AUTH_KEY_PROGRAM:
