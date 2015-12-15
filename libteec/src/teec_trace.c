@@ -121,6 +121,7 @@ int _dprintf(const char *function, int flen, int line, int level,
 	}
 
 	fprintf(stdout, "%s", to_print);
+	fflush(stdout);
 
 	log_to_file(to_print);
 
@@ -168,5 +169,6 @@ void dump_buffer(const char *bname, const uint8_t *buffer, size_t blen)
 	(void)bname;
 	(void)buffer;
 	(void)blen;
+
 }
 #endif

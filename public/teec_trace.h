@@ -135,4 +135,15 @@ int _dprintf(const char *function, int flen, int line, int level,
  */
 void dump_buffer(const char *bname, const uint8_t *buffer, size_t blen);
 
+#if (DEBUGLEVEL < TRACE_DEBUG)
+#define DHEXDUMP(buf, len) (void)0
+#else
+#define DHEXDUMP(buf, len) do {                                               \
+		char func_line[100] = { 0, };                                 \
+		snprintf(func_line, sizeof(func_line) - 1, "%s:%d", __func__, \
+			 __LINE__);                                           \
+		dump_buffer(func_line, (buf), (len));                         \
+	} while (0)
+#endif
+
 #endif
