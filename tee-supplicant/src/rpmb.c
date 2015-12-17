@@ -70,6 +70,11 @@ struct rpmb_dev_info {
  * End of common definitions
  */
 
+/*
+ * This structure is shared with OP-TEE and the MMC ioctl layer.
+ * It is the "data frame for RPMB access" defined by JEDEC, minus the
+ * start and stop bits.
+ */
 struct rpmb_data_frame {
 	uint8_t stuff_bytes[196];
 	uint8_t key_mac[32];
@@ -103,22 +108,29 @@ struct rpmb_data_frame {
 
 /*
  * ioctl() interface
- * See: uapi/linux/major.h, linux/mmc/core.h
+ * Comes from: uapi/linux/major.h, linux/mmc/core.h
  */
 
 #define MMC_BLOCK_MAJOR	179
 
 /* mmc_ioc_cmd.opcode */
+#define MMC_SEND_EXT_CSD		 8
+#define MMC_SEND_CID			10
 #define MMC_READ_MULTIPLE_BLOCK		18
 #define MMC_WRITE_MULTIPLE_BLOCK	25
 
 /* mmc_ioc_cmd.flags */
 #define MMC_RSP_PRESENT	(1 << 0)
+#define MMC_RSP_136     (1 << 1) /* 136 bit response */
 #define MMC_RSP_CRC	(1 << 2) /* Expect valid CRC */
 #define MMC_RSP_OPCODE	(1 << 4) /* Response contains opcode */
+
 #define MMC_RSP_R1      (MMC_RSP_PRESENT|MMC_RSP_CRC|MMC_RSP_OPCODE)
+#define MMC_RSP_R2      (MMC_RSP_PRESENT|MMC_RSP_136|MMC_RSP_CRC)
+
 #define MMC_CMD_ADTC	(1 << 5) /* Addressed data transfer command */
 
+/* mmc_ioc_cmd.write_flag */
 #define MMC_CMD23_ARG_REL_WR	(1 << 31) /* CMD23 reliable write */
 
 #ifndef RPMB_EMU
@@ -154,6 +166,7 @@ static int mmc_rpmb_fd(uint16_t dev_id)
 
 #define EMU_RPMB_SIZE_BYTES	(128 * 1024)	/* rpmb_size_mult * 128 kB */
 
+/* Emulated eMMC device state */
 struct rpmb_emu {
 	uint8_t buf[EMU_RPMB_SIZE_BYTES];
 	size_t size;
@@ -238,6 +251,40 @@ static uint16_t ioctl_emu_read_ctr(struct rpmb_emu *mem,
 	return RPMB_RESULT_OK;
 }
 
+static void ioctl_emu_set_cid(uint8_t *cid)
+{
+	/* This is the CID of the actual eMMC chip of my HiKey board */
+	static const uint8_t test_cid[] = {
+		/* MID (Manufacturer ID): Micron */
+		0xfe,
+		/* CBX (Device/BGA): BGA */
+		0x01,
+		/* OID (OEM/Application ID) */
+		0x4e,
+		/* PNM (Product name) "MMC04G" */
+		0x4d, 0x4d, 0x43, 0x30, 0x34, 0x47,
+		/* PRV (Product revision): 4.2 */
+		0x42,
+		/* PSN (Product serial number) */
+		0xc8, 0xf6, 0x55, 0x2a,
+		/*
+		 * MDT (Manufacturing date):
+		 * June, 2014
+		 */
+		0x61,
+		/* (CRC7 (0xA) << 1) | 0x1 */
+		0x15
+	};
+
+	memcpy(cid, test_cid, sizeof(test_cid));
+}
+
+static void ioctl_emu_set_ext_csd(uint8_t *ext_csd)
+{
+	ext_csd[168] = 0x01; /* RPMB data size = 1 * 128 kB */
+	ext_csd[222] = 0x01; /* Reliable write size = 1 * 256 bytes */
+}
+
 /* A crude emulation of the MMC ioctls we need for RPMB */
 static int ioctl_emu(int fd, unsigned long request, ...)
 {
@@ -264,6 +311,14 @@ static int ioctl_emu(int fd, unsigned long request, ...)
 
 
 	switch (cmd->opcode) {
+	case MMC_SEND_CID:
+		ioctl_emu_set_cid((uint8_t *)cmd->data_ptr);
+		break;
+
+	case MMC_SEND_EXT_CSD:
+		ioctl_emu_set_ext_csd((uint8_t *)cmd->data_ptr);
+		break;
+
 	case MMC_WRITE_MULTIPLE_BLOCK:
 		switch (msg_type) {
 		case RPMB_MSG_TYPE_REQ_AUTH_KEY_PROGRAM:
@@ -349,6 +404,47 @@ static int mmc_rpmb_fd(uint16_t dev_id)
 
 #endif /* RPMB_EMU */
 
+/* Device Identification (CID) register is 16 bytes */
+static uint32_t read_cid(int fd, uint8_t *cid)
+{
+	int st;
+	struct mmc_ioc_cmd cmd = { 0, };
+
+	cmd.blksz = 16;
+	cmd.blocks = 1;
+	cmd.flags = MMC_RSP_R2;
+	cmd.opcode = MMC_SEND_CID;
+	mmc_ioc_cmd_set_data(cmd, cid);
+
+	st = IOCTL(fd, MMC_IOC_CMD, &cmd);
+	if (st < 0)
+		return TEEC_ERROR_GENERIC;
+
+	return TEEC_SUCCESS;
+}
+
+/*
+ * Extended CSD Register is 512 bytes and defines device properties
+ * and selected modes.
+ */
+static uint32_t read_ext_csd(int fd, uint8_t *ext_csd)
+{
+	int st;
+	struct mmc_ioc_cmd cmd = { 0, };
+
+	cmd.blksz = 512;
+	cmd.blocks = 1;
+	cmd.flags = MMC_RSP_R1 | MMC_CMD_ADTC;
+	cmd.opcode = MMC_SEND_EXT_CSD;
+	mmc_ioc_cmd_set_data(cmd, ext_csd);
+
+	st = IOCTL(fd, MMC_IOC_CMD, &cmd);
+	if (st < 0)
+		return TEEC_ERROR_GENERIC;
+
+	return TEEC_SUCCESS;
+}
+
 static uint32_t rpmb_data_req(int fd, struct rpmb_data_frame *req_frm,
 			      size_t req_nfrm, struct rpmb_data_frame *rsp_frm,
 			      size_t rsp_nfrm)
@@ -356,14 +452,8 @@ static uint32_t rpmb_data_req(int fd, struct rpmb_data_frame *req_frm,
 	int st;
 	size_t i;
 	uint16_t msg_type = ntohs(req_frm->msg_type);
-	struct mmc_ioc_cmd cmd;/* = {
-		.blksz = 512,
-		.blocks = req_nfrm,
-		.data_ptr = (uintptr_t)req_frm,
-		.flags = MMC_RSP_R1 | MMC_CMD_ADTC,
-		.opcode = MMC_WRITE_MULTIPLE_BLOCK,
-		.write_flag = 1
-		};*/
+	struct mmc_ioc_cmd cmd = { 0, };
+
 	cmd.blksz = 512;
 	cmd.blocks = req_nfrm;
 	cmd.data_ptr = (uintptr_t)req_frm;
@@ -451,36 +541,13 @@ static uint32_t rpmb_data_req(int fd, struct rpmb_data_frame *req_frm,
 
 static uint32_t rpmb_get_dev_info(int fd, struct rpmb_dev_info *info)
 {
-	/* TODO use ioctl() interface */
-	(void)fd;
-
-	/* This is the CID of the actual eMMC chip if my HiKey board */
-	static const uint8_t test_cid[] = { /* MID (Manufacturer ID): Micron */
-					    0xfe,
-					    /* CBX (Device/BGA): BGA */
-					    0x01,
-					    /* OID (OEM/Application ID) */
-					    0x4e,
-					     /* PNM (Product name) "MMC04G" */
-					    0x4d, 0x4d, 0x43, 0x30, 0x34, 0x47,
-					    /* PRV (Product revision): 4.2 */
-					    0x42,
-					    /* PSN (Product serial number) */
-					    0xc8, 0xf6, 0x55, 0x2a,
-					    /*
-					     * MDT (Manufacturing date):
-					     * June, 2014
-					     */
-					    0x61,
-					    /* (CRC7 (0xA) << 1) | 0x1 */
-					    0x15 };
+	uint8_t ext_csd[512];
 
 	INMSG();
-
-	memcpy(info->cid, test_cid, sizeof(info->cid));
-	info->rel_wr_sec_c = 0x01; /* Reliable write size = 1 * 256 bytes */
-	info->rpmb_size_mult = 0x01; /* RPMB data size = 1 * 128 kB */
-
+	read_cid(fd, info->cid);
+	read_ext_csd(fd, ext_csd);
+	info->rel_wr_sec_c = ext_csd[222];
+	info->rpmb_size_mult = ext_csd[168];
 	info->ret_code = RPMB_CMD_GET_DEV_INFO_RET_OK;
 	OUTMSG();
 
