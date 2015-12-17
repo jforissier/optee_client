@@ -201,7 +201,7 @@ static uint16_t ioctl_emu_mem_transfer(struct rpmb_emu *mem,
 				       struct rpmb_data_frame *frm,
 				       size_t nfrm, int to_mmc)
 {
-	size_t start = ntohs(frm->address) * 256;
+	size_t start = mem->last_op.address * 256;
 	size_t size = nfrm * 256;
 	size_t i;
 	uint8_t *memptr;
@@ -212,8 +212,8 @@ static uint16_t ioctl_emu_mem_transfer(struct rpmb_emu *mem,
 	}
 	for (i = 0; i < nfrm; i++) {
 		memptr = mem->buf + start + i * 256;
-		DMSG("Transferring data (to_mmc=%d offset=%zu)", to_mmc,
-		     start + i * 256);
+		DMSG("Transferring 1 data block %s MMC (byte offset=%zu)",
+		     to_mmc ? "to" : "from", start + i * 256);
 		if (to_mmc) {
 			memcpy(memptr, frm[i].data, 256);
 			mem->write_counter++;
@@ -224,11 +224,13 @@ static uint16_t ioctl_emu_mem_transfer(struct rpmb_emu *mem,
 			memcpy(frm[i].data, memptr, 256);
 			frm[i].msg_type =
 				htons(RPMB_MSG_TYPE_RESP_AUTH_DATA_READ);
-			frm[i].address = mem->last_op.address;
+			frm[i].address = htons(mem->last_op.address);
 			frm[i].block_count = nfrm;
 
 		}
+#ifdef RPMB_EMU_DUMP_DATA
 		DHEXDUMP(memptr, 256);
+#endif
 		frm[i].op_result = RPMB_RESULT_OK;
 	}
 
@@ -329,18 +331,18 @@ static int ioctl_emu(int fd, unsigned long request, ...)
 
 		case RPMB_MSG_TYPE_REQ_AUTH_DATA_WRITE:
 			/* Write data */
+			mem->last_op.address = ntohs(frm->address);
+			mem->last_op.msg_type = msg_type;
 			mem->last_op.op_result =
 					ioctl_emu_mem_transfer(mem, frm,
 							       cmd->blocks, 1);
-			mem->last_op.msg_type = msg_type;
-			mem->last_op.address = frm->address;
 			break;
 
 		case RPMB_MSG_TYPE_REQ_WRITE_COUNTER_VAL_READ:
 		case RPMB_MSG_TYPE_REQ_AUTH_DATA_READ:
 			memcpy(mem->nonce, frm->nonce, 16);
 			mem->last_op.msg_type = msg_type;
-			mem->last_op.address = frm->address;
+			mem->last_op.address = ntohs(frm->address);
 			break;
 		default:
 			break;
@@ -359,7 +361,7 @@ static int ioctl_emu(int fd, unsigned long request, ...)
 			frm->msg_type =
 				htons(RPMB_MSG_TYPE_RESP_AUTH_DATA_WRITE);
 			frm->op_result = mem->last_op.op_result;
-			frm->address = mem->last_op.address;
+			frm->address = htons(mem->last_op.address);
 			frm->write_counter = htonl(mem->write_counter);
 			break;
 
