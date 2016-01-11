@@ -1,6 +1,8 @@
 /*
  * Copyright (c) 2014, STMicroelectronics International N.V.
  * All rights reserved.
+ * Copyright (c) 2015, Linaro Limited
+ * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions are met:
@@ -38,45 +40,31 @@
 #include <sys/time.h>
 #include <sys/mman.h>
 #include <sys/ioctl.h>
-#include <sys/queue.h>
 #include <unistd.h>
 
 #include <teec_trace.h>
-#include <teec_rpc.h>
 #include <teec_ta_load.h>
 #include <tee_supp_fs.h>
-#include <teec.h>
-#include <pthread.h>
 #include <rpmb.h>
 
-#define TEE_RPC_BUFFER_NUMBER 5
+#ifndef __aligned
+#define __aligned(x) __attribute__((__aligned__(x)))
+#endif
+#include <linux/tee.h>
 
-/* Flags of the shared memory. Also defined in tee_service.h in the kernel. */
-/*
- * Maximum size of the device name
- */
-#define TEEC_MAX_DEVNAME_SIZE 256
+#define RPC_NUM_PARAMS	2
 
-char devname1[TEEC_MAX_DEVNAME_SIZE];
-char devname2[TEEC_MAX_DEVNAME_SIZE];
+#define RPC_BUF_SIZE	(sizeof(struct tee_iocl_supp_send_arg) + \
+			 RPC_NUM_PARAMS * sizeof(struct tee_ioctl_param))
 
-struct tee_rpc_cmd {
-	union {
-		void	*buffer;
-		uint64_t padding_buf;
-	};
-	uint32_t size;
-	uint32_t type;
-	int fd;
-	int reserved;
-};
+#define RPC_CMD_LOAD_TA		0
+#define RPC_CMD_RPMB		1
+#define RPC_CMD_FS		2
 
-struct tee_rpc_invoke {
-	uint32_t cmd;
-	uint32_t res;
-	uint32_t nbr_bf;
-	uint32_t reserved;
-	struct tee_rpc_cmd cmds[TEE_RPC_BUFFER_NUMBER];
+union tee_rpc_invoke {
+	uint64_t buf[RPC_BUF_SIZE / sizeof(uint64_t)];
+	struct tee_iocl_supp_recv_arg recv;
+	struct tee_iocl_supp_send_arg send;
 };
 
 struct tee_rpc_ta {
@@ -84,328 +72,169 @@ struct tee_rpc_ta {
 	uint32_t supp_ta_handle;
 };
 
-static int read_request(int fd, struct tee_rpc_invoke *request);
-static void write_response(int fd, struct tee_rpc_invoke *request);
+static int read_request(int fd, union tee_rpc_invoke *request);
+static int write_response(int fd, union tee_rpc_invoke *request);
 static void free_param(TEEC_SharedMemory *shared_mem);
 
-struct share_mem_entry {
-	TEEC_SharedMemory shared_mem;
-	TAILQ_ENTRY(share_mem_entry) link;
-};
-static TAILQ_HEAD(, share_mem_entry) shared_memory_list =
-	TAILQ_HEAD_INITIALIZER(shared_memory_list);
-
-/* Mutex when allocatng /freeing shared memory */
-static pthread_mutex_t mutex_shm = PTHREAD_MUTEX_INITIALIZER;
-
-static void mutex_lock(void)
-{
-	pthread_mutex_lock(&mutex_shm);
-}
-
-static void mutex_unlock(void)
-{
-	pthread_mutex_unlock(&mutex_shm);
-}
-
-static void free_all_shared_memory(void)
-{
-	struct share_mem_entry *entry;
-
-	DMSG(">");
-
-	mutex_lock();
-	while (!TAILQ_EMPTY(&shared_memory_list)) {
-		entry = TAILQ_FIRST(&shared_memory_list);
-		TAILQ_REMOVE(&shared_memory_list, entry, link);
-		free_param(&entry->shared_mem);
-		free(entry);
-	}
-	mutex_unlock();
-
-	DMSG("<");
-}
-
-static void free_shared_memory(int fd)
-{
-	struct share_mem_entry *entry;
-
-	mutex_lock();
-	TAILQ_FOREACH(entry, &shared_memory_list, link)
-		if (entry->shared_mem.d.fd == fd)
-			break;
-
-	if (!entry) {
-		EMSG("Cannot find fd=%d\n", fd);
-		mutex_unlock();
-		return;
-	}
-
-	free_param(&entry->shared_mem);
-
-	TAILQ_REMOVE(&shared_memory_list, entry, link);
-	mutex_unlock();
-
-	free(entry);
-}
-
-static TEEC_SharedMemory *add_shared_memory(int fd, size_t size)
-{
-	struct tee_shm_io shm;
-	TEEC_SharedMemory *shared_mem;
-	struct share_mem_entry *entry;
-
-	entry = calloc(1, sizeof(struct share_mem_entry));
-	if (!entry)
-		return NULL;
-
-	shared_mem = &entry->shared_mem;
-
-	memset((void *)&shm, 0, sizeof(shm));
-	shm.buffer = NULL;
-	shm.size   = size;
-	shm.registered = 0;
-	shm.fd_shm = 0;
-	shm.flags = TEEC_MEM_INPUT | TEEC_MEM_OUTPUT;
-	if (ioctl(fd, TEE_ALLOC_SHM_IOC, &shm) != 0) {
-		EMSG("ioctl(TEE_ALLOC_SHM_IOC) failed! (%s)", strerror(errno));
-		shared_mem = NULL;
-		goto out;
-	}
-
-	shared_mem->size = size;
-	shared_mem->d.fd = shm.fd_shm;
-
-	shared_mem->buffer = mmap(NULL, size,
-				  PROT_READ | PROT_WRITE, MAP_SHARED,
-				  shared_mem->d.fd, 0);
-
-	if (shared_mem->buffer == (void *)MAP_FAILED) {
-		EMSG("mmap(%zu) failed - Error = %s", size, strerror(errno));
-		close(shared_mem->d.fd);
-		shared_mem = NULL;
-		goto out;
-	}
-
-	mutex_lock();
-	TAILQ_INSERT_TAIL(&shared_memory_list, entry, link);
-	mutex_unlock();
-
-out:
-	if (!shared_mem)
-		free(entry);
-
-	return shared_mem;
-}
-
 /* Get parameter allocated by secure world */
-static int get_param(int fd, struct tee_rpc_invoke *inv, const uint32_t idx,
-		     TEEC_SharedMemory *shared_mem)
+static int get_param(union tee_rpc_invoke *request, const uint32_t idx,
+		     TEEC_SharedMemory *shm)
 {
-	struct tee_shm_io shm;
+	struct tee_ioctl_param *params;
 
-	if (idx >= inv->nbr_bf)
+	if (idx >= request->recv.num_params)
 		return -1;
 
-	memset((void *)&shm, 0, sizeof(shm));
+	params = (struct tee_ioctl_param *)(&request->send + 1);
+	switch (params[idx].attr & TEE_IOCTL_PARAM_ATTR_TYPE_MASK) {
+	case TEE_IOCTL_PARAM_ATTR_TYPE_MEMREF_INPUT:
+	case TEE_IOCTL_PARAM_ATTR_TYPE_MEMREF_OUTPUT:
+	case TEE_IOCTL_PARAM_ATTR_TYPE_MEMREF_INOUT:
+		break;
+	default:
+		return -1;
+	}
 
-	shm.buffer = inv->cmds[idx].buffer;
-	shm.size   = inv->cmds[idx].size;
-	shm.registered = 0;
-	shm.fd_shm = 0;
-	shm.flags = TEEC_MEM_INPUT | TEEC_MEM_OUTPUT;
-
-	if (ioctl(fd, TEE_GET_FD_FOR_RPC_SHM_IOC, &shm) != 0) {
-		EMSG("ioctl(TEE_GET_FD_FOR_RPC_SHM_IOC) failed! (%s)",
+	memset(shm, 0, sizeof(*shm));
+	shm->flags = TEEC_MEM_INPUT | TEEC_MEM_OUTPUT;
+	shm->size = params[idx].u.memref.size;
+	shm->fd = params[idx].u.memref.shm_fd;
+	if (shm->fd == -1)
+		return 0;
+	shm->buffer = mmap(NULL, shm->size, PROT_READ | PROT_WRITE, MAP_SHARED,
+			   shm->fd, params[idx].u.memref.shm_offs);
+	params[idx].u.memref.shm_fd = -1; /* fd taken */
+	if (shm->buffer == (void *)MAP_FAILED) {
+		EMSG("failed to mmap parameter (fd %d, offs 0x%" PRIx64 ", idx %d): %s",
+		     shm->fd, (uint64_t)params[idx].u.memref.shm_offs, idx,
 		     strerror(errno));
+		close(shm->fd);
+		shm->fd = -1;
 		return -1;
 	}
-
-	memset(shared_mem, 0, sizeof(TEEC_SharedMemory));
-	shared_mem->size = shm.size;
-	shared_mem->flags = shm.flags;
-	shared_mem->d.fd = shm.fd_shm;
-
-	DMSG("size %u fd_shm %d", (int)shared_mem->size, shared_mem->d.fd);
-
-	shared_mem->buffer = mmap(NULL, shared_mem->size,
-				     PROT_READ | PROT_WRITE, MAP_SHARED,
-				     shared_mem->d.fd, 0);
-
-	if (shared_mem->buffer == (void *)MAP_FAILED) {
-		dprintf(TRACE_ERROR, "mmap(%d, %p) failed - Error = %s\n",
-			inv->cmds[idx].size, inv->cmds[idx].buffer,
-			strerror(errno));
-		close(shared_mem->d.fd);
-		return -1;
-	}
-	/* Erase value, since we don't want to send back input memory to TEE. */
-	inv->cmds[idx].buffer = 0;
-
 	return 0;
-}
-
-/* Allocate new parameter to be used in RPC communication */
-static TEEC_SharedMemory *alloc_param(int fd, struct tee_rpc_invoke *inv,
-				      const uint32_t idx, size_t size)
-{
-	TEEC_SharedMemory *shared_mem;
-
-	if (idx >= inv->nbr_bf) {
-		EMSG("idx %d >= inv->nbr_bf %d", idx, inv->nbr_bf);
-		return NULL;
-	}
-
-	if (inv->cmds[idx].buffer != NULL) {
-		EMSG("cmd[idx].buffer != NULL");
-		return NULL;
-	}
-
-	shared_mem = add_shared_memory(fd, size);
-	if (shared_mem == 0) {
-		EMSG("add_shared_memory() returned NULL");
-		return NULL;
-	}
-
-	inv->cmds[idx].buffer = shared_mem->buffer;
-	inv->cmds[idx].size = size;
-	inv->cmds[idx].type = TEE_RPC_BUFFER;
-	inv->cmds[idx].fd = shared_mem->d.fd;
-
-	return shared_mem;
 }
 
 /* Release parameter recieved from get_param or alloc_param */
 static void free_param(TEEC_SharedMemory *shared_mem)
 {
-	INMSG("%p %u (%p)", shared_mem->buffer,
-	      (int)shared_mem->size, shared_mem);
+	if (!shared_mem->buffer)
+		return;
 	if (munmap(shared_mem->buffer, shared_mem->size) != 0)
-		EMSG("munmap(%p, %u) failed - Error = %s",
-		     shared_mem->buffer, (int)shared_mem->size,
+		EMSG("munmap(%p, %zu) failed - Error = %s",
+		     shared_mem->buffer, shared_mem->size,
 		     strerror(errno));
-	close(shared_mem->d.fd);
-	OUTMSG();
+	close(shared_mem->fd);
 }
 
-static void process_fs(int fd, struct tee_rpc_invoke *inv)
+static void process_fs(union tee_rpc_invoke *request)
 {
-	TEEC_SharedMemory shared_mem;
+	TEEC_SharedMemory shm;
 
-	INMSG();
-	if (get_param(fd, inv, 0, &shared_mem)) {
-		inv->res = TEEC_ERROR_BAD_PARAMETERS;
+	if (request->recv.num_params != 1 || get_param(request, 0, &shm)) {
+		request->send.ret = TEEC_ERROR_BAD_PARAMETERS;
 		return;
 	}
 
-	tee_supp_fs_process(shared_mem.buffer, shared_mem.size);
-	inv->res = TEEC_SUCCESS;;
+	tee_supp_fs_process(shm.buffer, shm.size);
+	request->send.ret = TEEC_SUCCESS;;
 
-	free_param(&shared_mem);
-	OUTMSG();
+	free_param(&shm);
 }
 
-static void load_ta(int fd, struct tee_rpc_invoke *inv)
+static void load_ta(union tee_rpc_invoke *request)
 {
-	void *ta = NULL;
 	int ta_found = 0;
 	size_t size = 0;
 	struct tee_rpc_ta *cmd;
-	TEEC_SharedMemory shared_mem;
+	TEEC_SharedMemory shm_cmd = { 0 };
+	TEEC_SharedMemory shm_ta = { 0 };
 
-	INMSG();
-	if (get_param(fd, inv, 0, &shared_mem)) {
-		inv->res = TEEC_ERROR_BAD_PARAMETERS;
+	if (request->recv.num_params != 2 || get_param(request, 0, &shm_cmd) ||
+	    get_param(request, 1, &shm_ta)) {
+		request->send.ret = TEEC_ERROR_BAD_PARAMETERS;
 		return;
 	}
-	cmd = (struct tee_rpc_ta *)shared_mem.buffer;
+	cmd = (struct tee_rpc_ta *)shm_cmd.buffer;
 
-	ta_found = TEECI_LoadSecureModule(devname1, &cmd->uuid, &ta, &size);
-	/* Tracked by 6408 */
-	if (ta_found != TA_BINARY_FOUND)
-		ta_found = TEECI_LoadSecureModule(devname2, &cmd->uuid, &ta, &size);
-
+	size = shm_ta.size;
+	ta_found = TEECI_LoadSecureModule("optee_armtz", &cmd->uuid,
+					  shm_ta.buffer, &size);
 	if (ta_found == TA_BINARY_FOUND) {
-		TEEC_SharedMemory *ta_shm = alloc_param(fd, inv, 1, size);
+		struct tee_ioctl_param *params =
+			(struct tee_ioctl_param *)(&request->recv + 1);
 
-		if (!ta_shm) {
-			inv->res = TEEC_ERROR_OUT_OF_MEMORY;
-		} else {
-			inv->res = TEEC_SUCCESS;
-
-			memcpy(ta_shm->buffer, ta, size);
-
-			/* Fd will come back from TEE for unload. */
-			cmd->supp_ta_handle = ta_shm->d.fd;
-		}
-
-		free(ta);
+		params[1].u.memref.size = size;
+		request->send.ret = TEEC_SUCCESS;
 	} else {
 		EMSG("  TA not found");
-		inv->res = TEEC_ERROR_ITEM_NOT_FOUND;
+		request->send.ret = TEEC_ERROR_ITEM_NOT_FOUND;
 	}
 
-	free_param(&shared_mem);
-	OUTMSG();
+	free_param(&shm_cmd);
+	free_param(&shm_ta);
 }
 
-static void free_ta(struct tee_rpc_invoke *inv)
+/* How many device sequence numbers will be tried before giving up */
+#define MAX_DEV_SEQ	10
+
+static int open_dev(const char *devname)
 {
-	INMSG();
-	free_shared_memory(inv->cmds[0].fd);
-	inv->nbr_bf = 0;
-	inv->res = TEEC_SUCCESS;
-	OUTMSG();
+	struct tee_ioctl_version_data vers;
+	int fd;
+
+	fd = open(devname, O_RDWR);
+	if (fd < 0)
+		return -1;
+
+	if (ioctl(fd, TEE_IOC_VERSION, &vers))
+		goto err;
+
+	/* Only OP-TEE supported */
+	if (vers.impl_id != TEE_IMPL_ID_OPTEE)
+		goto err;
+
+	DMSG("using device \"%s\"", devname);
+	return fd;
+err:
+	close(fd);
+	return -1;
 }
 
-static void get_ree_time(int fd, struct tee_rpc_invoke *inv)
+static int get_dev_fd(void)
 {
-	struct TEE_Time {
-		uint32_t seconds;
-		uint32_t millis;
-	};
-	struct timeval tv;
+	int fd;
+	char name[PATH_MAX];
+	size_t n;
 
-	TEEC_SharedMemory shared_mem;
-	struct TEE_Time *tee_time;
-
-	INMSG();
-	if (get_param(fd, inv, 0, &shared_mem)) {
-		inv->res = TEEC_ERROR_BAD_PARAMETERS;
-		return;
+	for (n = 0; n < MAX_DEV_SEQ; n++) {
+		snprintf(name, sizeof(name), "/dev/teepriv%zu", n);
+		fd = open_dev(name);
+		if (fd >= 0)
+			return fd;
 	}
-
-	tee_time = (struct TEE_Time *)shared_mem.buffer;
-	gettimeofday(&tv, NULL);
-
-	tee_time->seconds = tv.tv_sec;
-	tee_time->millis = tv.tv_usec / 1000;
-
-	DMSG("%ds:%dms", tee_time->seconds, tee_time->millis);
-
-	inv->res = TEEC_SUCCESS;
-
-	/* Unmap the memory. */
-	free_param(&shared_mem);
-	OUTMSG();
+	return -1;
 }
 
-static void process_rpmb(int fd, struct tee_rpc_invoke *inv)
+static void usage(void)
+{
+	fprintf(stderr, "usage: tee-supplicant [<device-name>]");
+	exit(1);
+}
+
+static void process_rpmb(union tee_rpc_invoke *request)
 {
 	TEEC_SharedMemory req, rsp;
 
 	INMSG();
-	if (get_param(fd, inv, 0, &req)) {
-		inv->res = TEEC_ERROR_BAD_PARAMETERS;
-		goto out;
-	}
-	if (get_param(fd, inv, 1, &rsp)) {
-		inv->res = TEEC_ERROR_BAD_PARAMETERS;
+	if (request->recv.num_params != 2 || get_param(request, 0, &req) ||
+	    get_param(request, 1, &rsp)) {
+		request->send.ret = TEEC_ERROR_BAD_PARAMETERS;
 		goto out;
 	}
 
-	inv->res = rpmb_process_request(req.buffer, req.size, rsp.buffer,
-					rsp.size);
+	request->send.ret = rpmb_process_request(req.buffer, req.size,
+						 rsp.buffer, rsp.size);
 
 	free_param(&req);
 	free_param(&rsp);
@@ -416,31 +245,23 @@ out:
 int main(int argc, char *argv[])
 {
 	int fd;
-	int n = 0;
-	char devpath[TEEC_MAX_DEVNAME_SIZE];
-	struct tee_rpc_invoke request;
+	union tee_rpc_invoke request;
 	int ret;
 
-	sprintf(devpath, "/dev/opteearmtz00");
-	sprintf(devname1, "optee_armtz");
-	sprintf(devname2, "teetz");
-
-	while (--argc) {
-		n++;
-		if (strncmp(argv[n], "opteearmtz00", 12) == 0) {
-			snprintf(devpath, TEEC_MAX_DEVNAME_SIZE, "%s", "/dev/opteearmtz00");
-			snprintf(devname1, TEEC_MAX_DEVNAME_SIZE, "%s", "optee_armtz");
-			snprintf(devname2, TEEC_MAX_DEVNAME_SIZE, "%s", "teetz");
-		} else {
-			EMSG("Invalid argument #%d", n);
+	if (argc > 2)
+		usage();
+	if (argc == 2) {
+		fd = open_dev(argv[1]);
+		if (fd < 0) {
+			EMSG("failed to open \"%s\"", argv[1]);
 			exit(EXIT_FAILURE);
 		}
-	}
-
-	fd = open(devpath, O_RDWR);
-	if (fd < 0) {
-		EMSG("error opening [%s]", devpath);
-		exit(EXIT_FAILURE);
+	} else {
+		fd = get_dev_fd();
+		if (fd < 0) {
+			EMSG("failed to find an OP-TEE supplicant device");
+			exit(EXIT_FAILURE);
+		}
 	}
 
 	if (tee_supp_fs_init() != 0) {
@@ -448,98 +269,86 @@ int main(int argc, char *argv[])
 		exit(EXIT_FAILURE);
 	}
 
-	IMSG("tee-supplicant running on %s", devpath);
-
 	/* major failure on read kills supplicant, malformed data will not */
 	do {
 		DMSG("looping");
+		memset(&request, 0, sizeof(request));
+		request.recv.num_params = RPC_NUM_PARAMS;
 		ret = read_request(fd, &request);
 		if (ret == 0) {
-			switch (request.cmd) {
-			case TEE_RPC_LOAD_TA:
-				load_ta(fd, &request);
+			switch (request.recv.func) {
+			case RPC_CMD_LOAD_TA:
+				load_ta(&request);
 				break;
 
-			case TEE_RPC_FREE_TA:
-				free_ta(&request);
+			case RPC_CMD_FS:
+				process_fs(&request);
 				break;
 
-			case TEE_RPC_GET_TIME:
-				get_ree_time(fd, &request);
-				break;
-
-			case TEE_RPC_FS:
-				process_fs(fd, &request);
-				break;
-
-			case TEE_RPC_RPMB_CMD:
-				process_rpmb(fd, &request);
+			case RPC_CMD_RPMB:
+				process_rpmb(&request);
 				break;
 
 			default:
 				EMSG("Cmd [0x%" PRIx32 "] not supported",
-				     request.cmd);
+				     request.recv.func);
 				/* Not supported. */
-				request.res = TEEC_ERROR_BAD_PARAMETERS;
-				request.nbr_bf = 0;
 				break;
 			}
 			IMSG("");
 
-			write_response(fd, &request);
-			IMSG("");
+			ret = write_response(fd, &request);
 		}
 	} while (ret >= 0);
 
-	free_all_shared_memory();
 	close(fd);
 
-	return EXIT_SUCCESS;
+	return EXIT_FAILURE;
 }
 
-static int read_request(int fd, struct tee_rpc_invoke *request)
+static int read_request(int fd, union tee_rpc_invoke *request)
 {
-	ssize_t res = 0;
+	struct tee_ioctl_buf_data data;
 
-	if (fd < 0) {
-		EMSG("invalid fd");
+	data.buf_ptr = (uintptr_t)request;
+	data.buf_len = sizeof(*request);
+	if (ioctl(fd, TEE_IOC_SUPPL_RECV, &data)) {
+		EMSG("TEE_IOC_SUPPL_RECV: %s", strerror(errno));
 		return -1;
 	}
-
-	res = read(fd, request, sizeof(*request));
-	if (res < 0)
-		return -1;
-
-	if ((size_t)res < sizeof(*request) - sizeof(request->cmds)) {
-		EMSG("error reading from driver");
-		return 1;
-	}
-
-	if (sizeof(*request) - sizeof(request->cmds) +
-	    sizeof(request->cmds[0]) * request->nbr_bf != (size_t)res) {
-		DMSG("length read does not equal expected length");
-		return 1;
-	}
-
 	return 0;
 }
 
-static void write_response(int fd, struct tee_rpc_invoke *request)
+static int write_response(int fd, union tee_rpc_invoke *request)
 {
-	size_t writesize;
-	size_t res;
+	struct tee_ioctl_buf_data data;
+	struct tee_ioctl_param *params;
+	size_t n;
 
-	if (fd < 0) {
-		EMSG("invalid fd");
-		return;
+	/* Close file descriptors not claimed */
+	params = (struct tee_ioctl_param *)(&request->send + 1);
+	for (n = 0; n < request->send.num_params; n++) {
+		switch (params[n].attr & TEE_IOCTL_PARAM_ATTR_TYPE_MASK) {
+		case TEE_IOCTL_PARAM_ATTR_TYPE_MEMREF_INPUT:
+		case TEE_IOCTL_PARAM_ATTR_TYPE_MEMREF_OUTPUT:
+		case TEE_IOCTL_PARAM_ATTR_TYPE_MEMREF_INOUT:
+			if (params[n].u.memref.shm_fd != -1)
+				close(params[n].u.memref.shm_fd);
+			params[n].u.memref.shm_fd = -1;
+			break;
+		default:
+			break;
+		}
 	}
 	IMSG("");
 
-	writesize = sizeof(*request) - sizeof(request->cmds) +
-		sizeof(request->cmds[0]) * request->nbr_bf;
-
-	IMSG("");
-	res = write(fd, request, writesize);
-	if (res != writesize)
-		EMSG("error writing to device (%zu)", res);
+	data.buf_ptr = (uintptr_t)&request->send;
+	data.buf_len = sizeof(struct tee_iocl_supp_send_arg) +
+		       sizeof(struct tee_ioctl_param) *
+				request->send.num_params;
+	if (ioctl(fd, TEE_IOC_SUPPL_SEND, &data)) {
+		EMSG("TEE_IOC_SUPPL_SEND: %s", strerror(errno));
+		return -1;
+	}
+	return 0;
 }
