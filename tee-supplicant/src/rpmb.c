@@ -197,18 +197,27 @@ static struct rpmb_emu *mem_for_fd(int fd)
 }
 
 #if (DEBUGLEVEL >= TRACE_FLOW)
-static void dump_blocks(size_t blknum, uint8_t *ptr)
+static void dump_blocks(size_t startblk, size_t numblk, uint8_t *ptr,
+			bool to_mmc)
 {
 	char msg[100];
+	size_t i;
 
-	snprintf(msg, sizeof(msg), "MMC block %zu", blknum);
-	dump_buffer(msg, ptr, 256);
+	for (i = 0; i < numblk; i++) {
+		snprintf(msg, sizeof(msg), "%s MMC block %zu",
+			 to_mmc ? "Write" : "Read", startblk + i);
+		dump_buffer(msg, ptr, 256);
+		ptr += 256;
+	}
 }
 #else
-static void dump_blocks(size_t blknum, uint8_t *ptr)
+static void dump_blocks(size_t startblk, size_t numblk, uint8_t *ptr,
+			bool to_mmc)
 {
-	(void)blknum;
+	(void)startblk;
+	(void)numblk;
 	(void)ptr;
+	(void)to_mmc;
 }
 #endif
 
@@ -303,9 +312,9 @@ static uint16_t ioctl_emu_mem_transfer(struct rpmb_emu *mem,
 			frm[i].block_count = nfrm;
 			memcpy(frm[i].nonce, mem->nonce, 16);
 		}
-		dump_blocks(start / 256, memptr);
 		frm[i].op_result = RPMB_RESULT_OK;
 	}
+	dump_blocks(mem->last_op.address, nfrm, mem->buf + start, to_mmc);
 
 	if (!to_mmc)
 		compute_hmac(mem, frm, nfrm);
