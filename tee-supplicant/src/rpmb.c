@@ -41,6 +41,8 @@
 #ifdef RPMB_EMU
 #include <stdarg.h>
 #include "hmac_sha2.h"
+#else
+#include <errno.h>
 #endif
 
 /*
