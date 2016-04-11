@@ -127,11 +127,14 @@
  *                  fd field instead of the buffer field.
  * TEEC_MEM_KAPI    Shared memory is required from another linux module.
  *                  Dma buf file descriptor is not created.
+ * TEEC_MEM_SECURE  Shared memory will be protected by TEE so that it may only
+ *                  be accessed from secure world.
  */
 #define TEEC_MEM_INPUT   0x00000001
 #define TEEC_MEM_OUTPUT  0x00000002
 #define TEEC_MEM_DMABUF  0x00010000
 #define TEEC_MEM_KAPI    0x00020000
+#define TEEC_MEM_SECURE  0x00040000
 
 /**
  * Return values. Type is TEEC_Result
