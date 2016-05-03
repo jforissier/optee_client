@@ -68,6 +68,8 @@ struct tee_fs_rpc {
 #define TEE_FS_RMDIR     13
 #define TEE_FS_ACCESS    14
 #define TEE_FS_LINK      15
+#define TEE_FS_BEGIN     16 /* SQL FS: begin transaction */
+#define TEE_FS_END       17 /* SQL FS: end transaction */
 
 /*
  * Open flags, defines shared with TEE.

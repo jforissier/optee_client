@@ -14,7 +14,11 @@ export VPREFIX
 
 EXPORT_DIR ?= $(O)/export
 
-WITH_SQLFS ?= y
+WITH_SQLFS ?= n
+
+ifeq ($(WITH_SQLFS),y)
+BUILD-LIBSQLFS = build-libsqlfs
+endif
 
 .PHONY: all build build-libteec install copy_export \
 	clean cscope clean-cscope \
@@ -29,7 +33,7 @@ build-libteec:
 	@echo "Building libteec.so"
 	@$(MAKE) --directory=libteec --no-print-directory --no-builtin-variables
 
-build-tee-supplicant: build-libteec
+build-tee-supplicant: build-libteec $(BUILD-LIBSQLFS)
 	@echo "Building tee-supplicant"
 	$(MAKE) --directory=tee-supplicant  --no-print-directory --no-builtin-variables
 
@@ -126,6 +130,7 @@ copy_export: build
 	cp public/*.h ${EXPORT_DIR}/include
 
 ifeq ($(WITH_SQLFS),y)
+
 .PHONY: build-libsqlite3 build-libsqlfs
 
 build: build-libsqlite3 build-libsqlfs

@@ -22,11 +22,16 @@ TEES_SRCS	:= tee_supplicant.c \
 ifeq ($(RPMB_EMU),1)
 TEES_SRCS	+= sha2.c hmac_sha2.c
 endif
+ifeq ($(WITH_SQLFS),y)
+TEES_SRCS	+= sql_fs.c
+endif
 
 TEES_SRC_DIR	:= src
 TEES_OBJ_DIR	:= $(OUT_DIR)
 TEES_OBJS 	:= $(patsubst %.c,$(TEES_OBJ_DIR)/%.o, $(TEES_SRCS))
 TEES_INCLUDES 	:= ${CURDIR}/../libteec/include \
+		   ${CURDIR}/../libsqlite3/include \
+		   ${CURDIR}/../libsqlfs/include \
 		   ${CURDIR}/src \
 		   ${CURDIR}/../public \
 
@@ -38,6 +43,13 @@ TEES_CFLAGS	+= -DRPMB_EMU=1
 endif
 TEES_FILE	:= $(OUT_DIR)/$(PACKAGE_NAME)
 TEES_LDFLAGS    := -L$(OUT_DIR)/../libteec -lteec
+
+ifeq ($(WITH_SQLFS),y)
+TEES_CFLAGS	+= -DWITH_SQLFS
+TEES_CFLAGS	+= -Wno-strict-prototypes -Wno-implicit-function-declaration \
+		   -Wno-nested-externs -Wno-unused-function
+TEES_LDFLAGS	+= -L$(OUT_DIR)/../libsqlfs -lsqlfs -ldl
+endif
 
 tee-supplicant: $(TEES_FILE)
 
