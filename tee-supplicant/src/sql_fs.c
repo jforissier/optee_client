@@ -27,7 +27,6 @@
 
 #include <errno.h>
 #include <handle.h>
-#include <pthread.h>
 #include <sql_fs.h>
 #include <sqlfs.h>
 #include <sqlfs_internal.h>
@@ -49,8 +48,7 @@ struct file_state {
 	struct fuse_file_info fi;
 };
 
-static pthread_mutex_t fd_db_mutex = PTHREAD_MUTEX_INITIALIZER;
-static struct handle_db fd_db = HANDLE_DB_INITIALIZER_WITH_MUTEX(&fd_db_mutex);
+static struct handle_db fd_db = HANDLE_DB_INITIALIZER;
 
 /*
  * Directory handles
@@ -68,9 +66,7 @@ struct dir_entry {
 	TAILQ_ENTRY(dir_entry) link;
 };
 
-static pthread_mutex_t dir_db_mutex = PTHREAD_MUTEX_INITIALIZER;
-static struct handle_db dir_db =
-		HANDLE_DB_INITIALIZER_WITH_MUTEX(&dir_db_mutex);
+static struct handle_db dir_db = HANDLE_DB_INITIALIZER;
 
 static sqlfs_t *db;
 
