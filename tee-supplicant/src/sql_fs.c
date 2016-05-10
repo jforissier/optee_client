@@ -395,17 +395,16 @@ static int sql_fs_end(struct tee_fs_rpc *fsrpc)
 
 int sql_fs_init(void)
 {
-	struct stat st;
+	const char *db_path = "/data/tee/sstore.db";
 	int rc;
 
 	mkdir("/data", 0700);
 	mkdir("/data/tee", 0700);
-	rc = stat("/data/tee", &st);
-	if (rc < 0)
-		return rc;
-	rc = sqlfs_open("/data/tee/sstore.db", &db);
-	if (!rc)
+	rc = sqlfs_open(db_path, &db);
+	if (!rc) {
+		EMSG("Failed to open or create %s", db_path);
 		return -1;
+	}
 
 	return 0;
 }
