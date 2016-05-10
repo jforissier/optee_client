@@ -21,6 +21,16 @@ LOCAL_C_INCLUDES := $(LOCAL_PATH)/../public \
     $(LOCAL_PATH)/src
 
 LOCAL_SHARED_LIBRARIES := libteec
+
+ifeq ($(WITH_SQLFS),y)
+LOCAL_SRC_FILES += src/sql_fs.c
+LOCAL_CFLAGS += -DWITH_SQLFS
+LOCAL_CFLAGS += -Wno-strict-prototypes
+LOCAL_C_INCLUDES += $(LOCAL_PATH)/../libsqlfs/include \
+                    $(LOCAL_PATH)/../libsqlite3/include
+LOCAL_SHARED_LIBRARIES += libsqlfs
+endif
+
 LOCAL_MODULE := tee-supplicant
 LOCAL_MODULE_TAGS := optional
 include $(BUILD_EXECUTABLE)
