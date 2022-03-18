@@ -231,39 +231,49 @@ again:
 	return n - nleft; /* return >= 0 */
 }
 
-/* Device Identification (CID) register is 16 bytes. It is read from sysfs. */
-static uint32_t read_cid(uint16_t dev_id, uint8_t *cid)
+static TEEC_Result read_cid_str(uint16_t dev_id, char cid[33])
 {
 	TEEC_Result res = TEEC_ERROR_GENERIC;
 	char path[48] = { 0 };
-	char hex[3] = { 0 };
-	int st = 0;
 	int fd = 0;
-	int i = 0;
+	int st = 0;
 
 	snprintf(path, sizeof(path),
 		 "/sys/class/mmc_host/mmc%u/mmc%u:0001/cid", dev_id, dev_id);
 	fd = open(path, O_RDONLY);
-	if (fd < 0) {
-		EMSG("Could not open %s (%s)", path, strerror(errno));
+	if (fd < 0)
 		return TEEC_ERROR_ITEM_NOT_FOUND;
+	st = readn(fd, cid, 32);
+	if (st != 32) {
+		EMSG("Read CID error");
+		if (errno)
+			EMSG("%s", strerror(errno));
+		res = TEEC_ERROR_NO_DATA;
+		goto err;
 	}
-
-	for (i = 0; i < 16; i++) {
-		st = readn(fd, hex, 2);
-		if (st != 2) {
-			EMSG("Read CID error");
-			if (errno)
-				EMSG("%s", strerror(errno));
-			res = TEEC_ERROR_NO_DATA;
-			goto err;
-		}
-		cid[i] = (uint8_t)strtol(hex, NULL, 16);
-	}
-	res = TEEC_SUCCESS;
 err:
 	close(fd);
 	return res;
+}
+
+/* Device Identification (CID) register is 16 bytes. It is read from sysfs. */
+static TEEC_Result read_cid(uint16_t dev_id, uint8_t *cid)
+{
+	TEEC_Result res = TEEC_ERROR_GENERIC;
+	char cid_str[33] = { 0 };
+	int i = 0;
+
+	res = read_cid_str(dev_id, cid_str);
+	if (res)
+		return res;
+
+	for (i = 0; i < 16; i++) {
+		errno = 0;
+		cid[i] = (uint8_t)strtol(cid_str + 2 * i, NULL, 16);
+		if (errno)
+			return TEEC_ERROR_NO_DATA;
+	}
+	return TEEC_SUCCESS;
 }
 
 #else /* RPMB_EMU */
