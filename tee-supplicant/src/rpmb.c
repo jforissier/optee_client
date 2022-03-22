@@ -286,9 +286,9 @@ static TEEC_Result read_cid(uint16_t dev_id, uint8_t *cid)
 
 /*
  * - If --rpmb-cid is given, find the eMMC RPMB device number with the specified
- * CID, cache the number, copy it to @nedv_id and return true. If not found
+ * CID, cache the number, copy it to @ndev_id and return true. If not found
  * return false.
- * - If --rpmb-cid is not given, @copy dev_id to @ndev_id and return true.
+ * - If --rpmb-cid is not given, copy @dev_id to @ndev_id and return true.
  */
 static bool remap_rpmb_dev_id(uint16_t dev_id, uint16_t *ndev_id)
 {
