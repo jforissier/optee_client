@@ -25,6 +25,7 @@
  * POSSIBILITY OF SUCH DAMAGE.
  */
 
+#include <dirent.h>
 #include <fcntl.h>
 #include <linux/types.h>
 #include <linux/mmc/ioctl.h>
@@ -297,32 +298,53 @@ static bool remap_rpmb_dev_id(uint16_t dev_id, uint16_t *ndev_id)
 {
 	TEEC_Result res = TEEC_ERROR_GENERIC;
 	static bool found = false;
+	static bool err = false;
 	static uint16_t id = 0;
 	char cid[33] = { 0 };
+	struct dirent *dent = NULL;
+	DIR *dir = NULL;
+	int num = 0;
 
-	if (found)
-		goto success;
+	if (err || found)
+		goto out;
 
 	if (!supplicant_params.rpmb_cid) {
 		id = dev_id;
 		found = true;
-		goto success;
+		goto out;
 	}
 
-	for (id = 0; id < NUM_MMC_DEVICES; id++) {
+	dir = opendir("/sys/class/mmc_host");
+	if (!dir) {
+		EMSG("Could not open /sys/class/mmc_host (%s)",
+		     strerror(errno));
+		err = true;
+		goto out;
+	}
+
+	while ((dent = readdir(dir))) {
+		if (sscanf(dent->d_name, "%*[^0123456789]%d", &num) != 1)
+			continue;
+		if (num > UINT16_MAX) {
+			EMSG("Too many MMC devices");
+			err = true;
+			break;
+		}
 		res = read_cid_str(id, cid);
 		if (res)
 			continue;
-		if (!strcmp(cid, supplicant_params.rpmb_cid)) {
-			found = true;
-			goto success;
-		}
+		found = true;
+		break;
 	}
 
-	return false;
-success:
-	*ndev_id = id;
-	return true;
+	closedir(dir);
+
+	if (!found)
+		err = true;
+out:
+	if (found)
+		*ndev_id = id;
+	return found;
 }
 
 #else /* RPMB_EMU */
