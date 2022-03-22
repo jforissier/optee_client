@@ -67,7 +67,8 @@ struct rpmb_req {
 
 /* Response to device info request */
 struct rpmb_dev_info {
-	uint8_t cid[16];
+#define RPMB_CID_SZ 16
+	uint8_t cid[RPMB_CID_SZ];
 	uint8_t rpmb_size_mult;	/* EXT CSD-slice 168: RPMB Size */
 	uint8_t rel_wr_sec_c;	/* EXT CSD-slice 222: Reliable Write Sector */
 				/*                    Count */
@@ -231,7 +232,10 @@ static ssize_t readn(int fd, void *ptr, size_t n)
 	return n - nleft; /* return >= 0 */
 }
 
-static TEEC_Result read_cid_str(uint16_t dev_id, char cid[33])
+/* Size of CID printed in hexadecimal */
+#define CID_STR_SZ (2 * RPMB_CID_SZ)
+
+static TEEC_Result read_cid_str(uint16_t dev_id, char cid[CID_STR_SZ + 1])
 {
 	TEEC_Result res = TEEC_ERROR_GENERIC;
 	char path[48] = { 0 };
@@ -243,8 +247,8 @@ static TEEC_Result read_cid_str(uint16_t dev_id, char cid[33])
 	fd = open(path, O_RDONLY);
 	if (fd < 0)
 		return TEEC_ERROR_ITEM_NOT_FOUND;
-	st = readn(fd, cid, 32);
-	if (st != 32) {
+	st = readn(fd, cid, CID_STR_SZ);
+	if (st != CID_STR_SZ) {
 		EMSG("Read CID error");
 		if (errno)
 			EMSG("%s", strerror(errno));
@@ -261,7 +265,7 @@ out:
 static TEEC_Result read_cid(uint16_t dev_id, uint8_t *cid)
 {
 	TEEC_Result res = TEEC_ERROR_GENERIC;
-	char cid_str[33] = { 0 };
+	char cid_str[CID_STR_SZ + 1] = { 0 };
 	int i = 0;
 
 	res = read_cid_str(dev_id, cid_str);
