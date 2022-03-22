@@ -250,9 +250,10 @@ static TEEC_Result read_cid_str(uint16_t dev_id, char cid[33])
 		if (errno)
 			EMSG("%s", strerror(errno));
 		res = TEEC_ERROR_NO_DATA;
-		goto err;
+		goto out;
 	}
-err:
+	res = TEEC_SUCCESS;
+out:
 	close(fd);
 	return res;
 }
