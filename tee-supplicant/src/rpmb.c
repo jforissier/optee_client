@@ -215,10 +215,9 @@ static ssize_t readn(int fd, void *ptr, size_t n)
 	uint8_t *p = ptr;
 
 	while (nleft > 0) {
-again:
 		if ((nread = read(fd, p, nleft)) < 0) {
 			if (errno == EINTR)
-				goto again;
+				continue;
 			if (nleft == n)
 				return -1; /* error, nothing read, return -1 */
 			else
