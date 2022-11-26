@@ -35,6 +35,8 @@ endif()
 ################################################################################
 add_library (teec ${SRC})
 
+cmake_path(APPEND teec_libdir "\${prefix}" "${CMAKE_INSTALL_LIBDIR}")
+cmake_path(APPEND teec_incdir "\${prefix}" "${CMAKE_INSTALL_INCLUDEDIR}")
 set(libteectgt teec)
 configure_file(libteec.pc.in libteec.pc @ONLY)
 
